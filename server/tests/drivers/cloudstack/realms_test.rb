@@ -1,22 +1,17 @@
-require 'minitest/autorun'
+require 'rubygems'
+require 'require_relative' if RUBY_VERSION < '1.9'
 
-require_relative File.join('..', '..', '..', 'lib', 'deltacloud', 'api.rb')
-require_relative 'common.rb'
+require_relative 'common'
 
-describe 'OpenStackDriver Realms' do
+describe 'MockDriver Realms' do
 
   before do
-    @driver = Deltacloud::new(:openstack, credentials)
-    VCR.insert_cassette __name__
-  end
-
-  after do
-    VCR.eject_cassette
+    @driver = Deltacloud::new(:mock, :user => 'mockuser', :password => 'mockpassword')
   end
 
   it 'must throw error when wrong credentials' do
     Proc.new do
-      @driver.backend.images(OpenStruct.new(:user => 'unknown+wrong', :password => 'wrong'))
+      @driver.backend.realms(OpenStruct.new(:user => 'unknown', :password => 'wrong'))
     end.must_raise Deltacloud::Exceptions::AuthenticationFailure, 'Authentication Failure'
   end
 
@@ -26,20 +21,17 @@ describe 'OpenStackDriver Realms' do
   end
 
   it 'must allow to filter realms' do
-    realms = @driver.realms :id => 'default'
-    realms.wont_be_empty
-    realms.must_be_kind_of Array
-    realms.size.must_equal 1
-    realms.first.id.must_equal 'default'
+    @driver.realms(:id => 'us').wont_be_empty
+    @driver.realms(:id => 'us').must_be_kind_of Array
+    @driver.realms(:id => 'us').size.must_equal 1
+    @driver.realms(:id => 'us').first.id.must_equal 'us'
     @driver.realms(:id => 'unknown').must_be_empty
   end
 
   it 'must allow to retrieve single realm' do
-    realm = @driver.realm :id => 'default'
-    realm.wont_be_nil
-    realm.id.must_equal 'default'
-    realm.limit.wont_be_empty
-    realm.state.must_equal 'AVAILABLE'
+    @driver.realm(:id => 'us').wont_be_nil
+    @driver.realm(:id => 'us').must_be_kind_of Realm
+    @driver.realm(:id => 'us').id.must_equal 'us'
     @driver.realm(:id => 'unknown').must_be_nil
   end
 

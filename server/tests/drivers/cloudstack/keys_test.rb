@@ -1,22 +1,17 @@
-require 'minitest/autorun'
+require 'rubygems'
+require 'require_relative' if RUBY_VERSION < '1.9'
 
-require_relative File.join('..', '..', '..', 'lib', 'deltacloud', 'api.rb')
-require_relative 'common.rb'
+require_relative 'common'
 
-describe 'OpenStackDriver Keys' do
+describe 'MockDriver Keys' do
 
   before do
-    @driver = Deltacloud::new(:openstack, credentials)
-    VCR.insert_cassette __name__
-  end
-
-  after do
-    VCR.eject_cassette
+    @driver = Deltacloud::new(:mock, :user => 'mockuser', :password => 'mockpassword')
   end
 
   it 'must throw error when wrong credentials' do
     Proc.new do
-      @driver.backend.images(OpenStruct.new(:user => 'unknown+wrong', :password => 'wrong'))
+      @driver.backend.keys(OpenStruct.new(:user => 'unknown', :password => 'wrong'))
     end.must_raise Deltacloud::Exceptions::AuthenticationFailure, 'Authentication Failure'
   end
 
@@ -26,36 +21,27 @@ describe 'OpenStackDriver Keys' do
   end
 
   it 'must allow to filter keys' do
-    keys = @driver.keys :id => 'test1'
-    keys.wont_be_empty
-    keys.must_be_kind_of Array
-    keys.size.must_equal 1
-    keys.first.name.must_equal 'test1'
+    @driver.keys(:id => 'test-key').wont_be_empty
+    @driver.keys(:id => 'test-key').must_be_kind_of Array
+    @driver.keys(:id => 'test-key').size.must_equal 1
+    @driver.keys(:id => 'test-key').first.id.must_equal 'test-key'
     @driver.keys(:id => 'unknown').must_be_empty
   end
 
   it 'must allow to retrieve single key' do
-    key = @driver.key :id => 'test2'
-    key.wont_be_nil
-    key.name.must_equal 'test2'
-    key.fingerprint.wont_be_empty
-    key.credential_type.must_equal :key
-    key.state.must_equal 'AVAILABLE'
+    @driver.key(:id => 'test-key').wont_be_nil
+    @driver.key(:id => 'test-key').must_be_kind_of Key
+    @driver.key(:id => 'test-key').id.must_equal 'test-key'
     @driver.key(:id => 'unknown').must_be_nil
   end
 
-  it 'must allow to create and destroy key' do
-    key = @driver.create_key(:key_name => 'test-unit-1')
+  it 'must allow to create a new key' do
+    key = @driver.create_key(:key_name => 'test1')
     key.wont_be_nil
-    key.id.must_equal 'test-unit-1'
-    key.fingerprint.wont_be_empty
-    key.pem_rsa_key.wont_be_empty
-    key.pem_rsa_key.must_match /^\-\-\-\-\-BEGIN RSA PRIVATE KEY/
-    # Should not allow duplicate keys to be created:
-    lambda {
-      @driver.create_key(:key_name => 'test-unit-1')
-    }.must_raise Deltacloud::Exceptions::BackendError
-    @driver.destroy_key(:id => 'test-unit-1').must_equal true
+    key.must_be_kind_of Key
+    Proc.new { @driver.create_key(:key_name => 'test1') }.must_raise Deltacloud::Exceptions::ForbiddenError, 'KeyExist'
+    @driver.destroy_key :id => key.id
+    @driver.key(:id => key.id).must_be_nil
   end
 
 end

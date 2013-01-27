@@ -1,3 +1,4 @@
+#
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
 # this work for additional information regarding copyright ownership.  The
@@ -12,541 +13,712 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
 # License for the specific language governing permissions and limitations
 # under the License.
-#
 
-require 'tempfile'
+require 'yaml'
 require 'base64'
+require 'etc'
+require 'ipaddr'
 
-module Deltacloud
-  module Drivers
-    module CloudStack
-      class CloudStackDriver < Deltacloud::BaseDriver
+require_relative 'cloudstack_driver_cimi_methods'
+require_relative '../../runner'
 
-        feature :instances, :user_name
-        feature :instances, :authentication_key
-        feature :instances, :authentication_password
-        feature :instances, :user_files
-        feature :instances, :user_data
-        feature :images, :user_name
-        feature :keys, :import_key
+module Deltacloud::Drivers::Cloudstack
 
-        define_instance_states do
-          start.to( :pending )          .on( :create )
-          pending.to( :running )        .automatically
-          running.to( :running )        .on( :reboot )
-          running.to( :stopping )       .on( :stop )
-          stopping.to( :stopped )       .automatically
-          stopped.to( :finish )         .automatically
-        end
+  class CloudstackDriver < Deltacloud::BaseDriver
 
-        define_hardware_profile('default')
+    ( REALMS = [
+      Realm.new({
+        :id=>'csdefault',
+        :name=>'Default CloudStack Region',
+        :limit=>:unlimited,
+        :state=>'AVAILABLE'}),
+      ] ) unless defined?( REALMS )
 
-        def supported_collections(credentials)
-          #get the collections as defined by 'capability' and 'respond_to?' blocks
-          super_collections = super
-          begin
-             new_client(credentials, :buckets)
-          rescue Deltacloud::Exceptions::NotImplemented #OpenStack::Exception::NotImplemented...
-             return super_collections - [Sinatra::Rabbit::BucketsCollection]
-          end
-          super_collections
-        end
+    define_hardware_profile('m1-small') do
+      cpu              1
+      memory         1.7 * 1024
+      storage        160
+      architecture 'i386'
+    end
 
-        def hardware_profiles(credentials, opts = {})
-          os = new_client(credentials)
-          results = []
-          safely do
-            if opts[:id]
-              begin
-                flavor = os.flavor(opts[:id])
-                results << convert_from_flavor(flavor)
-              rescue => e
-                raise e unless e.message =~ /The resource could not be found/
-                results = []
-              end
-            else
-              results = os.flavors.collect do |f|
-                convert_from_flavor(f)
-              end
-            end
-            filter_hardware_profiles(results, opts)
-          end
-        end
+    define_hardware_profile('m1-large') do
+      cpu              (1..6)
+      memory           ( 7680.. 15*1024), :default => 10 * 1024
+      storage          [ 850, 1024 ]
+      architecture     'x86_64'
+    end
 
-        def images(credentials, opts={})
-          os = new_client(credentials)
-          results = []
-          profiles = hardware_profiles(credentials)
-          safely do
-            if(opts[:id])
-              begin
-                img = os.get_image(opts[:id])
-                results << convert_from_image(img, os.connection.authuser)
-              rescue => e
-                raise e unless e.message =~ /Image not found/
-                results = []
-              end
-            else
-              results = os.list_images.collect do |i|
-                convert_from_image(i, os.connection.authuser)
-              end
-            end
-          end
-          results.each { |img| img.hardware_profiles = profiles }
-          filter_on(results, :owner_id, opts)
-        end
+    define_hardware_profile('m1-xlarge') do
+      cpu              4
+      memory           (12*1024 .. 32*1024)
+      storage          [ 1024, 2048, 4096 ]
+      architecture     'x86_64'
+    end
 
-        def create_image(credentials, opts)
-#          os = new_client(credentials)
-#          safely do
-#            server = os.get_server(opts[:id])
-#            image_name = opts[:name] || "#{server.name}_#{Time.now}"
-#            img = server.create_image(:name=>image_name)
-#            convert_from_image(img, os.connection.authuser)
-#          end
-        end
+    # Some clouds tell us nothing about hardware profiles (e.g., OpenNebula)
+    define_hardware_profile 'opaque'
 
-        def destroy_image(credentials, image_id)
-#          os = new_client(credentials)
-#          begin
-#            image = os.get_image(image_id)
-#            image.delete!
-#          rescue
-#            raise Deltacloud::Exceptions.exception_from_status(500, "Cannot delete image with id #{image_id}")
-#          end
-        end
+    define_instance_states do
+      start.to( :pending )       .on( :create )
 
-        def realms(credentials, opts={})
-#          os = new_client(credentials)
-#          limits = ""
-#          safely do
-#            lim = os.limits
-#              limits << "ABSOLUTE >> Max. Instances: #{lim[:absolute][:maxTotalInstances]} Max. RAM: #{lim[:absolute][:maxTotalRAMSize]}   ||   "
-#              lim[:rate].each do |rate|
-#                if rate[:regex] =~ /servers/
-#                  limits << "SERVERS >> Total: #{rate[:limit].first[:value]}  Remaining: #{rate[:limit].first[:remaining]} Time Unit: per #{rate[:limit].first[:unit]}"
-#                end
-#              end
-#          end
-#          return [] if opts[:id] and opts[:id] != 'default'
-#          [ Realm.new( { :id=>'default',
-#                        :name=>'default',
-#                        :limit => limits,
-#                        :state=>'AVAILABLE' })]
-        end
+      pending.to( :running )     .automatically
 
-        def instances(credentials, opts={})
-#          os = new_client(credentials)
-#          insts = []
-#          safely do
-#            if opts[:id]
-#              begin
-#                server = os.get_server(opts[:id])
-#                insts << convert_from_server(server, os.connection.authuser)
-#              rescue => e
-#                raise e unless e.message =~ /The resource could not be found/
-#                insts = []
-#              end
-#            else
-#              insts = os.list_servers_detail.collect do |s|
-#                convert_from_server(s, os.connection.authuser)
-#              end
-#            end
-#          end
-#          insts = filter_on( insts, :state, opts )
-#          insts
-        end
+      running.to( :running )     .on( :reboot )
+      running.to( :stopped )     .on( :stop )
 
-        def create_instance(credentials, image_id, opts)
-#          os = new_client( credentials )
-#          result = nil
-#####opts[:personality]: path1='server_path1'. content1='contents1', path2='server_path2', content2='contents2' etc
-#          params = {}
-#          params[:personality] = extract_personality(opts)
-#          params[:name] = (opts[:name] && opts[:name].length>0)? opts[:name] : "server#{Time.now.to_s}"
-#          params[:imageRef] = image_id
-#          params[:flavorRef] =  (opts[:hwp_id] && opts[:hwp_id].length>0) ?
-#                          opts[:hwp_id] : hardware_profiles(credentials).first.id
-#          if opts[:password] && opts[:password].length > 0
-#            params[:adminPass]=opts[:password]
-#          end
-#          if opts[:keyname] && opts[:keyname].length > 0
-#            params[:key_name]=opts[:keyname]
-#	  end
-#	  if opts[:user_data] && opts[:user_data].length > 0
-#	    params[:user_data]=Base64.encode64(opts[:user_data])
-#	  end
-#          safely do
-#            server = os.create_server(params)
-#            result = convert_from_server(server, os.connection.authuser)
-#          end
-#          result
-        end
+      stopped.to( :running )     .on( :start )
+      stopped.to( :finish )      .on( :destroy )
+    end
 
-        def reboot_instance(credentials, instance_id)
-#          os = new_client(credentials)
-#          safely do
-#            server = os.get_server(instance_id)
-#            server.reboot! # sends a hard reboot (power cycle) - could instead server.reboot("SOFT")
-#            convert_from_server(server, os.connection.authuser)
-#          end
-        end
+    feature :instances, :user_name
+    feature :instances, :user_data
+    feature :instances, :authentication_key
+    feature :instances, :metrics
+    feature :instances, :realm_filter
+    feature :images, :user_name
+    feature :images, :user_description
 
-        def destroy_instance(credentials, instance_id)
-#          os = new_client(credentials)
-#          server = instance = nil
-#          safely do
-#            server = os.get_server(instance_id)
-#            server.delete!
-#          end
-#          begin
-#            server.populate
-#            instance = convert_from_server(server, os.connection.authuser)
-#          rescue OpenStack::Exception::ItemNotFound
-#            instance = convert_from_server(server, os.connection.authuser)
-#            instance.state = "STOPPED"
-#          end
-#          instance
-        end
-
-        alias_method :stop_instance, :destroy_instance
-
-        def valid_credentials?(credentials)
-#          begin
-#            new_client(credentials)
-#          rescue
-#            return false
-#          end
-#          true
-        end
-
-        def buckets(credentials, opts={})
-#          os = new_client(credentials, :buckets)
-#          buckets = []
-#          safely do
-#            if opts[:id]
-#              buckets << convert_bucket(os.container(opts[:id]))
-#            else
-#              os.containers.each{|bucket_name| buckets << convert_bucket(os.container(bucket_name))}
-#            end
-#          end
-#          buckets
-        end
-
-        def create_bucket(credentials, name, opts={})
-#          os = new_client(credentials, :buckets)
-#          bucket = nil
-#          safely do
-#            bucket = os.create_container(name)
-#          end
-#          convert_bucket(bucket)
-        end
-
-        def delete_bucket(credentials, name, opts={})
-#          os = new_client(credentials, :buckets)
-#          safely do
-#            os.delete_container(name)
-#          end
-        end
-
-        def blobs(credentials, opts={})
-#          os = new_client(credentials, :buckets)
-#          blobs = []
-#          safely do
-#            bucket = os.container(opts['bucket'])
-#            if(opts[:id])
-#              blobs << convert_blob(bucket.object(opts[:id]), opts['bucket'])
-#            else
-#              bucket.objects_detail.each{|blob| blobs << convert_blob(blob, opts['bucket'])}
-#            end
-#          end
-#          blobs
-        end
-
-        def blob_data(credentials, bucket, blob, opts={})
-#          os = new_client(credentials, :buckets)
-#          safely do
-#            os.container(bucket).object(blob).data_stream do |chunk|
-#              yield chunk
-#            end
-#          end
-        end
-
-        def create_blob(credentials, bucket, blob, data, opts={})
-#          os = new_client(credentials, :buckets)
-#          safely do
-#            BlobHelper.rename_metadata_headers(opts, "X-Object-Meta-")
-#            os_blob = os.container(bucket).create_object(blob, {:content_type=> data[:type], :metadata=>opts}, data[:tempfile])
-#            convert_blob(os_blob, bucket)
-#          end
-        end
-
-        def delete_blob(credentials, bucket, blob, opts={})
-#          os = new_client(credentials, :buckets)
-#          safely do
-#            os.container(bucket).delete_object(blob)
-#          end
-        end
-
-        def blob_metadata(credentials, opts={})
-#          os = new_client(credentials, :buckets)
-#          safely do
-#            os.container(opts['bucket']).object(opts[:id]).metadata
-#          end
-        end
-
-        def update_blob_metadata(credentials, opts={})
-#          os = new_client(credentials, :buckets)
-#          safely do
-#            BlobHelper.rename_metadata_headers(opts["meta_hash"], "")
-#            blob = os.container(opts['bucket']).object(opts[:id])
-#            blob.set_metadata(opts['meta_hash'])
-#          end
-        end
-
-        #params: {:user,:password,:bucket,:blob,:content_type,:content_length,:metadata}
-        def blob_stream_connection(params)
-#          tokens = params[:user].split("+")
-#          user_name, tenant_name = tokens.first, tokens.last
-          #need a client for the auth_token and endpoints
-#          os = OpenStack::Connection.create(:username => user_name, :api_key => params[:password], :authtenant => tenant_name, :auth_url => api_provider, :service_type => "object-store")
-#          http = Net::HTTP.new(os.connection.service_host, os.connection.service_port)
-#          http.use_ssl = true
-#          http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-#          path = os.connection.service_path + URI.encode("/#{params[:bucket]}/#{params[:blob]}")
-#          request = Net::HTTP::Put.new(path)
-#          request['X-Auth-Token'] = os.connection.authtoken
-#          request['X-Storage-Token'] = os.connection.authtoken
-#          request['Connection'] = "Keep-Alive"
-#          request['Content-Type'] = params[:content_type]
-#          request['Content-Length'] = params[:content_length]
-#          request['Expect'] = "100-continue"
-#          metadata = params[:metadata] || {}
-#          BlobHelper::rename_metadata_headers(metadata, 'X-Object-Meta-')
-#          metadata.each{|k,v| request[k] = v}
-#          return http, request
-        end
-
-        def keys(credentials, opts={})
-#          os = new_client(credentials)
-#          keys = []
-#          safely do
-#            os.keypairs.values.each{|key| keys << convert_key(key)}
-#          end
-#          filter_on(keys, :id, opts)
-        end
-
-        def create_key(credentials, opts={})
-#          os = new_client(credentials)
-#          safely do
-#            params = (opts[:public_key] and opts[:public_key].length > 0)? {:name=>opts[:key_name], :public_key=> opts[:public_key]} : {:name=>opts[:key_name]}
-#            convert_key(os.create_keypair(params))
-#          end
-        end
-
-        def destroy_key(credentials, opts={})
-#          os = new_client(credentials)
-#          safely do
-#            os.delete_keypair(opts[:id])
-#          end
-        end
-
-private
-
-        #for v2 authentication credentials.name == "username+tenant_name"
-        def new_client(credentials, type = :compute)
-#          tokens = credentials.user.split("+")
-#          if credentials.user.empty?
-#            raise AuthenticationFailure.new(Exception.new("Error: you must supply the username"))
-#          end
-#          if (tokens.size != 2 && api_v2)
-#            raise ValidationFailure.new(Exception.new("Error: expected \"username+tenantname\" as username, you provided: #{credentials.user}"))
-#          else
-#            user_name, tenant_name = tokens.first, tokens.last
-#          end
-#          safely do
-#              case type
-#                when :compute
-#                  OpenStack::Connection.create(:username => user_name, :api_key => credentials.password, :authtenant => tenant_name, :auth_url => api_provider)
-#                when :buckets
-#                  OpenStack::Connection.create(:username => user_name, :api_key => credentials.password, :authtenant => tenant_name, :auth_url => api_provider, :service_type => "object-store")
-#                else
-#                  raise ValidationFailure.new(Exception.new("Error: tried to initialise Openstack connection using" +
-#                    " an unknown service_type: #{type}"))
-#              end
-#          end
-        end
-
-#NOTE: for the convert_from_foo methods below... openstack-compute
-#gives Hash for 'flavors' but OpenStack::Compute::Flavor for 'flavor'
-#hence the use of 'send' to deal with both cases and save duplication
-
-        def convert_from_flavor(flavor)
-#          op = (flavor.class == Hash)? :fetch : :send
-#          hwp = HardwareProfile.new(flavor.send(op, :id).to_s) do
-#            architecture 'x86_64'
-#            memory flavor.send(op, :ram).to_i
-#            storage flavor.send(op, :disk).to_i
-#            cpu flavor.send(op, :vcpus).to_i
-#          end
-#          hwp.name = flavor.send(op, :name)
-#          return hwp
-        end
-
-        def convert_from_image(image, owner)
-#          op = (image.class == Hash)? :fetch : :send
-#          Image.new({
-#                    :id => image.send(op, :id),
-#                    :name => image.send(op, :name),
-#                    :description => image.send(op, :name),
-#                    :owner_id => owner,
-#                    :state => image.send(op, :status),
-#                    :architecture => 'x86_64',
-#                    :creation_time => image.send(op, :created)
-#                    })
-        end
-
-        def convert_from_server(server, owner)
-#          op = (server.class == Hash)? :fetch : :send
-#          image = server.send(op, :image)
-#          flavor = server.send(op, :flavor)
-#          begin
-#            password = server.send(op, :adminPass) || ""
-#            rescue IndexError
-#              password = ""
-#          end
-#          inst = Instance.new(
-#            :id => server.send(op, :id).to_s,
-#            :realm_id => 'default',
-#            :owner_id => owner,
-#            :description => server.send(op, :name),
-#            :name => server.send(op, :name),
-#            :state => convert_instance_state(server.send(op, :status).downcase),
-#            :architecture => 'x86_64',
-#            :image_id => image[:id] || image["id"],
-#            :instance_profile => InstanceProfile::new(flavor[:id] || flavor["id"]),
-#            :public_addresses => convert_server_addresses(server, :public),
-#            :private_addresses => convert_server_addresses(server, :private),
-#            :username => 'root',
-#            :password => password,
-#            :keyname => server.send(op, :key_name)
-#          )
-#          inst.actions = instance_actions_for(inst.state)
-#          inst.create_image = 'RUNNING'.eql?(inst.state)
-#          inst
-        end
-
-        def convert_instance_state(openstack_state)
-#          case openstack_state
-#            when /.*reboot/
-#              "PENDING"
-#            when /.*deleting/
-#              "STOPPING"
-#            when /.*deleted/
-#              "STOPPED"
-#            when /build.*$/
-#              "PENDING"
-#            when /active/
-#              "RUNNING"
-#            else
-#              "UNKOWN"
-#          end
-        end
-
-        def convert_server_addresses(server, type)
-#          op, address_label = (server.class == Hash)? [:fetch, :addr] : [:send, :address]
-#          addresses = (server.send(op, :addresses)[type] || []).collect do |addr|
-#            type = (addr.send(op, :version) == 4)? :ipv4 : :ipv6
-#            InstanceAddress.new(addr.send(op, address_label), {:type=>type} )
-#          end
-        end
-
-        def convert_bucket(bucket)
-#          Bucket.new({ :id => bucket.name,
-#                       :name => bucket.name,
-#                       :size => bucket.count,
-#                       :blob_list => bucket.objects })
-        end
-
-        def convert_blob(blob, bucket_name)
-#          op, blob_meta = (blob.class == Hash)? [:fetch, {}] : [:send, blob.metadata]
-#          Blob.new({   :id => blob.send(op, :name),
-#                       :bucket => bucket_name,
-#                       :content_length => blob.send(op, :bytes),
-#                       :content_type => blob.send(op, :content_type),
-#                       :last_modified => blob.send(op, :last_modified),
-#                       :user_metadata => blob_meta })
-        end
-
-        def convert_key(key)
-#          Key.new(
-#            :id => key[:name],
-#            :fingerprint => key[:fingerprint],
-#            :credential_type => :key,
-#            :pem_rsa_key => key[:private_key], # only available once, on create_key
-#            :state => "AVAILABLE"
-#          )
-        end
+    #cimi features
+    feature :machines, :default_initial_state do
+      { :values => ["STARTED"] }
+    end
+    feature :machines, :initial_states do
+      { :values => ["STARTED", "STOPPED"]}
+    end
 
 
-        #IN: path1='server_path1'. content1='contents1', path2='server_path2', content2='contents2' etc
-        #OUT:{local_path=>server_path, local_path1=>server_path2 etc}
-        def extract_personality(opts)
-#          personality_hash =  opts.inject({}) do |result, (opt_k,opt_v)|
-#            if (opt_k.to_s =~ /^path([1-5]+)/ and opts[opt_k] != nil and opts[opt_k].length > 0)
-#              unless opts[:"content#{$1}"].nil?
-#                case opts[:"content#{$1}"]
-#                  when String
-#                    tempfile = Tempfile.new("os_personality_local_#{$1}")
-#                    tempfile.write(opts[:"content#{$1}"])
-#                    result[tempfile.path]=opts[:"path#{$1}"]
-#                  when Hash
-#                    result[opts[:"content#{$1}"][:tempfile].path]=opts[:"path#{$1}"]
-#                end
-#              end
-#            end
-#            result
-#          end
-        end
+    def initialize
+      if ENV["DELTACLOUD_MOCK_STORAGE"]
+        storage_root = ENV["DELTACLOUD_MOCK_STORAGE"]
+      elsif Etc.getlogin
+        storage_root = File::join("/var/tmp", "deltacloud-mock-#{ENV["USER"]}")
+      else
+        raise "Please set either the DELTACLOUD_MOCK_STORAGE or USER environment variable"
+      end
+      @client = Client.new(storage_root)
+    end
 
-        def api_v2
-#          if api_provider =~ /.*v2.0/
-#            true
-#          else
-#            false
-#          end
-        end
+    def realms(credentials, opts={})
+      check_credentials( credentials )
+      results = []
+      safely do
+        # This hack is used to test if client capture exceptions correctly
+        # To raise an exception do GET /api/realms/50[0-2]
+        raise "DeltacloudErrorTest" if opts and opts[:id] == "500"
+        raise "NotImplementedTest" if opts and opts[:id] == "501"
+        raise "ProviderErrorTest" if opts and opts[:id] == "502"
+        raise "ProviderTimeoutTest" if opts and opts[:id] == "504"
+        results = REALMS
+      end
+      results = filter_on( results, :id, opts )
+      results
+    end
 
-        exceptions do
+    #
+    # Images
+    #
+    def images(credentials, opts=nil )
+      check_credentials( credentials )
+      images = []
+      images = @client.build_all(Image)
+      images = filter_on( images, :id, opts )
+      images = filter_on( images, :architecture, opts )
+      if ( opts && opts[:owner_id] == 'self' )
+        images = images.select{|e| e.owner_id == credentials.user }
+      else
+        images = filter_on( images, :owner_id, opts )
+      end
+      images = images.map { |i| (i.hardware_profiles = hardware_profiles(nil)) && i }
+      images.sort_by{|e| [e.owner_id, e.description]}
+    end
 
-          on /(Exception::BadRequest|PersonalityFilePathTooLong|PersonalityFileTooLarge|TooManyPersonalityItems)/ do
-            status 400
-          end
-
-          on /Must supply a :username/ do
-            status 401
-          end
-
-          on /CloudStack::Exception::Authentication/ do
-            status 401
-          end
-
-          on /CloudStack::Exception::ItemNotFound/ do
-            status 404
-          end
-
-          on /Exception::Other/ do
-            status 500
-          end
-
-          on /CloudStack::Exception::NotImplemented/ do
-            status 501
-          end
-
-        end
-
-
+    def create_image(credentials, opts={})
+      check_credentials(credentials)
+      instance = instance(credentials, :id => opts[:id])
+      safely do
+        raise 'CreateImageNotSupported' unless instance and instance.can_create_image?
+        image = {
+          :id => opts[:name],
+          :name => opts[:name],
+          :owner_id => 'root',
+          :state => "AVAILABLE",
+          :description => opts[:description],
+          :architecture => 'i386'
+        }
+        @client.store(:images, image)
+        Image.new(image)
       end
     end
+
+    def destroy_image(credentials, id)
+      check_credentials( credentials )
+      @client.destroy(:images, id)
+    end
+
+    #
+    # Instances
+    #
+
+    def instance(credentials, opts={})
+      check_credentials( credentials )
+      if instance = @client.load_collection(:instances, opts[:id])
+        Instance.new(instance)
+      end
+    end
+
+    def instances(credentials, opts={})
+      check_credentials( credentials )
+      instances = @client.build_all(Instance)
+      instances = filter_on( instances, :owner_id, :owner_id => credentials.user )
+      instances = filter_on( instances, :id, opts )
+      instances = filter_on( instances, :state, opts )
+      instances = filter_on( instances, :realm_id, opts)
+      instances
+    end
+
+    def create_instance(credentials, image_id, opts)
+      check_credentials( credentials )
+      ids = @client.members(:instances)
+
+      count = 0
+      while true
+        next_id = "inst" + count.to_s
+        if not ids.include?(next_id)
+          break
+        end
+        count = count + 1
+      end
+
+      realm_id = opts[:realm_id]
+      if ( realm_id.nil? )
+        realm = realms(credentials).first
+        ( realm_id = realm.id ) if realm
+      end
+
+      hwp = find_hardware_profile(credentials, opts[:hwp_id], image_id)
+      hwp ||= find_hardware_profile(credentials, 'm1-small', image_id)
+
+      name = opts[:name] || "i-#{Time.now.to_i}"
+
+      instance = {
+        :id => next_id,
+        :name=>name,
+        :state=>'RUNNING',
+        :keyname => opts[:keyname],
+        :image_id=>image_id,
+        :owner_id=>credentials.user,
+        :public_addresses=>[ InstanceAddress.new("#{image_id}.#{next_id}.public.com", :type => :hostname) ],
+        :private_addresses=>[ InstanceAddress.new("#{image_id}.#{next_id}.private.com", :type => :hostname) ],
+        :instance_profile => InstanceProfile.new(hwp.name, opts),
+        :realm_id=>realm_id,
+        :create_image=>true,
+        :actions=>instance_actions_for( 'RUNNING' ),
+        :user_data => opts[:user_data] ? Base64::decode64(opts[:user_data]) : nil
+      }
+      @client.store(:instances, instance)
+      Instance.new( instance )
+    end
+
+    def update_instance_state(credentials, id, state)
+      instance  = @client.load_collection(:instances, id)
+      instance[:state] = state
+      instance[:actions] = instance_actions_for( instance[:state] )
+      @client.store(:instances, instance)
+      Instance.new( instance )
+    end
+
+    def start_instance(credentials, id)
+      update_instance_state(credentials, id, 'RUNNING')
+    end
+
+    def reboot_instance(credentials, id)
+      update_instance_state(credentials, id, 'RUNNING')
+    end
+
+    def stop_instance(credentials, id)
+      update_instance_state(credentials, id, 'STOPPED')
+    end
+
+
+    def destroy_instance(credentials, id)
+      check_credentials( credentials )
+      @client.destroy(:instances, id)
+    end
+
+    # mock object to mimick Net::SSH object
+    class Mock_ssh
+      attr_accessor :command
+    end
+
+    def run_on_instance(credentials, opts={})
+      ssh = Mock_ssh.new
+      ssh.command = opts[:cmd]
+      Deltacloud::Runner::Response.new(ssh, "This is where the output would appear if this were not a mock provider")
+    end
+
+    #
+    # Storage Volumes
+    #
+    def storage_volumes(credentials, opts=nil)
+      check_credentials( credentials )
+      volumes = @client.build_all(StorageVolume)
+      volumes = filter_on( volumes, :id, opts )
+      volumes
+    end
+
+    def create_storage_volume(credentials, opts={})
+      check_credentials(credentials)
+      opts[:capacity] ||= "1"
+      id = "Volume#{Time.now.to_i}"
+      volume = {
+            :id => id,
+            :name => opts[:name] ? opts[:name] : id,
+            :created => Time.now.to_s,
+            :state => "AVAILABLE",
+            :capacity => opts[:capacity],
+      }
+      @client.store(:storage_volumes, volume)
+      StorageVolume.new(volume)
+    end
+
+    def destroy_storage_volume(credentials, opts={})
+      check_credentials(credentials)
+      @client.destroy(:storage_volumes, opts[:id])
+    end
+
+    #opts: {:id=,:instance_id,:device}
+    def attach_storage_volume(credentials, opts={})
+      check_credentials(credentials)
+      attach_volume_instance(opts[:id], opts[:device], opts[:instance_id])
+    end
+
+    def detach_storage_volume(credentials, opts)
+      check_credentials(credentials)
+      detach_volume_instance(opts[:id], opts[:instance_id])
+    end
+
+    #
+    # Storage Snapshots
+    #
+
+    def storage_snapshots(credentials, opts=nil)
+      check_credentials( credentials )
+      snapshots = @client.build_all(StorageSnapshot)
+      snapshots = filter_on(snapshots, :id, opts )
+      snapshots
+    end
+
+    def create_storage_snapshot(credentials, opts={})
+      check_credentials(credentials)
+      id = "store_snapshot_#{Time.now.to_i}"
+      snapshot = {
+            :id => id,
+            :created => Time.now.to_s,
+            :state => "COMPLETED",
+            :storage_volume_id => opts[:volume_id],
+      }
+      snapshot.merge!({:name=>opts[:name]}) if opts[:name]
+      snapshot.merge!({:description=>opts[:description]}) if opts[:description]
+      @client.store(:storage_snapshots, snapshot)
+      StorageSnapshot.new(snapshot)
+    end
+
+    def destroy_storage_snapshot(credentials, opts={})
+      check_credentials(credentials)
+      @client.destroy(:storage_snapshots, opts[:id])
+    end
+
+    def keys(credentials, opts={})
+      check_credentials(credentials)
+      result = @client.build_all(Key)
+      result = filter_on( result, :id, opts )
+      result
+    end
+
+    def key(credentials, opts={})
+      keys(credentials, opts).first
+    end
+
+    def create_key(credentials, opts={})
+      check_credentials(credentials)
+      key_hash = {
+        :id => opts[:key_name],
+        :credential_type => :key,
+        :fingerprint => Key::generate_mock_fingerprint,
+        :pem_rsa_key => Key::generate_mock_pem
+      }
+      safely do
+        raise "KeyExist" if @client.load_collection(:keys, key_hash[:id])
+        @client.store(:keys, key_hash)
+      end
+      return Key.new(key_hash)
+    end
+
+    def destroy_key(credentials, opts={})
+      key = key(credentials, opts)
+      @client.destroy(:keys, key.id)
+    end
+
+    def addresses(credentials, opts={})
+      check_credentials(credentials)
+      addresses = @client.build_all(Address)
+      addresses = filter_on( addresses, :id, opts )
+    end
+
+    def create_address(credentials, opts={})
+      check_credentials(credentials)
+      address = {:id => allocate_mock_address.to_s, :instance_id=>nil}
+      @client.store(:addresses, address)
+      Address.new(address)
+    end
+
+    def destroy_address(credentials, opts={})
+      check_credentials(credentials)
+      address = @client.load_collection(:addresses, opts[:id])
+      raise "AddressInUse" unless address[:instance_id].nil?
+      @client.destroy(:addresses, opts[:id])
+    end
+
+    def associate_address(credentials, opts={})
+      check_credentials(credentials)
+      address = @client.load_collection(:addresses, opts[:id])
+      raise "AddressInUse" unless address[:instance_id].nil?
+      instance = @client.load_collection(:instances, opts[:instance_id])
+      address[:instance_id] = instance[:id]
+      instance[:public_addresses] = [InstanceAddress.new(address[:id])]
+      @client.store(:addresses, address)
+      @client.store(:instances, instance)
+    end
+
+    def disassociate_address(credentials, opts={})
+      check_credentials(credentials)
+      address = @client.load_collection(:addresses, opts[:id])
+      raise "AddressNotInUse" unless address[:instance_id]
+      instance = @client.load_collection(:instances, address[:instance_id])
+      address[:instance_id] = nil
+      instance[:public_addresses] = [InstanceAddress.new("#{instance[:image_id]}.#{instance[:id]}.public.com", :type => :hostname)]
+      @client.store(:addresses, address)
+      @client.store(:instances, instance)
+    end
+
+    #--
+    # Buckets
+    #--
+    def buckets(credentials, opts={})
+      check_credentials(credentials)
+      buckets = @client.build_all(Bucket)
+      blob_map = @client.load_all(:blobs).inject({}) do |map, blob|
+        map[blob[:bucket]] ||= []
+        map[blob[:bucket]] << blob[:id]
+        map
+      end
+      buckets.each { |bucket| bucket.blob_list = blob_map[bucket.id] }
+      filter_on( buckets, :id, opts )
+    end
+
+    #--
+    # Create bucket
+    #--
+    def create_bucket(credentials, name, opts={})
+      check_credentials(credentials)
+      bucket = {
+        :id => name,
+        :name=>name,
+        :size=>'0',
+        :blob_list=>[]
+      }
+      @client.store(:buckets, bucket)
+      Bucket.new(bucket)
+    end
+
+    #--
+    # Delete bucket
+    #--
+    def delete_bucket(credentials, name, opts={})
+      check_credentials(credentials)
+      bucket = bucket(credentials, {:id => name})
+      raise 'BucketNotExist' if bucket.nil?
+      raise "BucketNotEmpty" unless bucket.blob_list.empty?
+      @client.destroy(:buckets, bucket.id)
+    end
+
+    #--
+    # Blobs
+    #--
+    def blobs(credentials, opts = {})
+      check_credentials(credentials)
+      blobs = @client.build_all(Blob)
+      filter_on( blobs, :bucket, :bucket => opts['bucket'] )
+      filter_on( blobs, :id, opts )
+    end
+
+    #--
+    # Blob content
+    #--
+    def blob_data(credentials, bucket_id, blob_id, opts = {})
+      check_credentials(credentials)
+      if blob = @client.load_collection(:blobs, blob_id)
+        #give event machine a chance
+        sleep 1
+        blob[:content].split('').each {|part| yield part}
+      end
+    end
+
+    #--
+    # Create blob
+    #--
+    def create_blob(credentials, bucket_id, blob_id, blob_data, opts={})
+      check_credentials(credentials)
+      blob_meta = BlobHelper::extract_blob_metadata_hash(opts)
+      blob = {
+        :id => blob_id,
+        :name => blob_id,
+        :bucket => bucket_id,
+        :last_modified => Time.now,
+        :user_metadata => BlobHelper::rename_metadata_headers(blob_meta, ''),
+      }
+      if blob_data.kind_of? Hash
+        blob_data[:tempfile].rewind
+        blob.merge!({
+          :content_length => blob_data[:tempfile].length,
+          :content_type => blob_data[:type],
+          :content => blob_data[:tempfile].read
+        })
+      elsif blob_data.kind_of? String
+        blob.merge!({
+          :content_length => blob_data.size,
+          :content_type => 'text/plain',
+          :content => blob_data
+        })
+      end
+      @client.store(:blobs, blob)
+      Blob.new(blob)
+    end
+
+    #--
+    # Delete blob
+    #--
+    def delete_blob(credentials, bucket_id, blob_id, opts={})
+      check_credentials(credentials)
+      safely do
+        raise "NotExistentBlob" unless @client.load_collection(:blobs, blob_id)
+        @client.destroy(:blobs, blob_id)
+      end
+    end
+
+    #--
+    # Get metadata
+    #--
+    def blob_metadata(credentials, opts={})
+      check_credentials(credentials)
+      if blob = @client.load_collection(:blobs, opts[:id])
+        blob[:user_metadata]
+      else
+        nil
+      end
+    end
+
+    #--
+    # Update metadata
+    #--
+    def update_blob_metadata(credentials, opts={})
+      check_credentials(credentials)
+      safely do
+        blob = @client.load_collection(:blobs, opts[:id])
+        return false unless blob
+        blob[:user_metadata] = BlobHelper::rename_metadata_headers(opts['meta_hash'], '')
+        @client.store(:blobs, blob)
+      end
+    end
+
+    #--
+    # Metrics
+    #--
+    def metrics(credentials, opts={})
+      check_credentials( credentials )
+      instances = @client.build_all(Instance)
+      instances = filter_on( instances, :id, opts )
+
+      metrics_arr = instances.collect do |instance|
+        Metric.new(
+          :id     => instance.id,
+          :entity => instance.name
+        )
+      end
+
+      # add metric names to metrics
+      metrics_arr.each do |metric|
+        @@METRIC_NAMES.each do |name|
+          metric.add_property(name)
+        end
+        metric.properties.sort! {|a,b| a.name <=> b.name}
+      end
+      metrics_arr
+    end
+
+    def metric(credentials, opts={})
+      metric = metrics(credentials, opts).first
+
+      metric.properties.each do |property|
+
+        property.values = (0..5).collect do |i|
+
+          unit = metric_unit_for(property.name)
+          average = (property.name == 'cpuUtilization') ? (rand * 1000).to_i / 10.0 : rand(1000)
+          max = (property.name == 'cpuUtilization') ? (1000 + 10 * average).to_i / 20.0 : average * (i + 1)
+          min = (property.name == 'cpuUtilization') ? (2.5 * average).to_i / 10.0 : (average / 4).to_i
+          {
+            :minimum   => min,
+            :maximum   => max,
+            :average   => average,
+            :timestamp => Time.now - i * 60,
+            :unit      => unit
+          }
+        end
+      end
+      metric
+    end
+
+    def valid_credentials?(credentials)
+      begin
+        check_credentials(credentials)
+        return true
+      rescue
+      end
+      return false
+    end
+
+    private
+
+    def check_credentials(credentials)
+      safely do
+        if ( credentials.user != 'mockuser' ) or ( credentials.password != 'mockpassword' )
+          raise 'AuthFailure'
+        end
+      end
+    end
+
+    #Mock allocation of 'new' address
+    #There is a synchronization problem (but it's the mock driver,
+    #mutex seemed overkill)
+    def allocate_mock_address
+      addresses = []
+      @client.members(:addresses).each do |addr|
+        addresses << IPAddr.new("#{addr}").to_i
+      end
+      IPAddr.new(addresses.sort.pop+1, Socket::AF_INET)
+    end
+
+    def attach_volume_instance(volume_id, device, instance_id)
+      volume = @client.load_collection(:storage_volumes, volume_id)
+      instance = @client.load_collection(:instances, instance_id)
+      volume[:instance_id] = instance_id
+      volume[:device] = device
+      volume[:state] = "IN-USE"
+      instance[:storage_volumes] ||= []
+      instance[:storage_volumes] << {volume_id=>device}
+      @client.store(:storage_volumes, volume)
+      @client.store(:instances, instance)
+      StorageVolume.new(volume)
+    end
+
+    def detach_volume_instance(volume_id, instance_id)
+      volume = @client.load_collection(:storage_volumes, volume_id)
+      instance = @client.load_collection(:instances, instance_id)
+      volume[:instance_id] = nil
+      device = volume[:device]
+      volume[:device] = nil
+      volume[:state] = "AVAILABLE"
+      instance[:storage_volumes].delete({volume_id => device}) unless instance[:storage_volumes].nil?
+      @client.store(:storage_volumes, volume)
+      @client.store(:instances, instance)
+      StorageVolume.new(volume)
+    end
+
+    def metric_unit_for(name)
+      case name
+        when /Utilization/ then 'Percent'
+        when /Byte/ then 'Bytes'
+        when /Sector/ then 'Count'
+        when /Count/ then 'Count'
+        when /Packet/ then 'Count'
+        else 'None'
+      end
+    end
+
+    # names copied from FGCP driver
+    @@METRIC_NAMES = [
+      'cpuUtilization',
+      'diskReadRequestCount',
+      'diskReadSector',
+      'diskWriteRequestCount',
+      'diskWriteSector',
+      'nicInputByte',
+      'nicInputPacket',
+      'nicOutputByte',
+      'nicOutputPacket'
+    ]
+
+    exceptions do
+
+      on /AuthFailure/ do
+        status 401
+        message "Authentication Failure"
+      end
+
+      on /BucketNotEmpty/ do
+        status 403
+        message "Delete operation not valid for non-empty bucket"
+      end
+
+      on /KeyExist/ do
+        status 403
+        message "Key with same name already exists"
+      end
+
+      on /AddressInUse/ do
+        status 403
+      end
+
+      on /AddressNotInUse/ do
+        status 403
+      end
+
+      on /BucketNotExist/ do
+        status 404
+      end
+
+      on /CreateImageNotSupported/ do
+        status 500
+      end
+
+      on /NotExistentBlob/ do
+        status 500
+        message "Could not delete a non existent blob"
+      end
+
+      on /DeltacloudErrorTest/ do
+        status 500
+        message "DeltacloudErrorMessage"
+      end
+
+      on /NotImplementedTest/ do
+        status 501
+        message "NotImplementedMessage"
+      end
+
+      on /ProviderErrorTest/ do
+        status 502
+        message "ProviderErrorMessage"
+      end
+
+      on /ProviderTimeoutTest/ do
+        status 504
+        message "ProviderTimeoutMessage"
+      end
+
+    end
+
   end
+
 end
