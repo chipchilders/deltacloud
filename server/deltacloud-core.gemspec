@@ -120,6 +120,6 @@ Gem::Specification.new do |s|
   s.add_dependency('rbvmomi')
 
   # CloudStack
-  s.add_dependency('cloudtack_ruby_client', '>= 0.0.2')
+  s.add_dependency('cloudstack_ruby_client', '>= 0.0.2')
 
 end
