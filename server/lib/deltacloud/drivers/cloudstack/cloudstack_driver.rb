@@ -14,6 +14,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+require 'cloudstack_ruby_client'
 require 'yaml'
 require 'base64'
 require 'etc'
@@ -33,27 +34,6 @@ module Deltacloud::Drivers::Cloudstack
         :limit=>:unlimited,
         :state=>'AVAILABLE'}),
       ] ) unless defined?( REALMS )
-
-    define_hardware_profile('m1-small') do
-      cpu              1
-      memory         1.7 * 1024
-      storage        160
-      architecture 'i386'
-    end
-
-    define_hardware_profile('m1-large') do
-      cpu              (1..6)
-      memory           ( 7680.. 15*1024), :default => 10 * 1024
-      storage          [ 850, 1024 ]
-      architecture     'x86_64'
-    end
-
-    define_hardware_profile('m1-xlarge') do
-      cpu              4
-      memory           (12*1024 .. 32*1024)
-      storage          [ 1024, 2048, 4096 ]
-      architecture     'x86_64'
-    end
 
     # Some clouds tell us nothing about hardware profiles (e.g., OpenNebula)
     define_hardware_profile 'opaque'
@@ -87,19 +67,8 @@ module Deltacloud::Drivers::Cloudstack
     end
 
 
-    def initialize
-      if ENV["DELTACLOUD_MOCK_STORAGE"]
-        storage_root = ENV["DELTACLOUD_MOCK_STORAGE"]
-      elsif Etc.getlogin
-        storage_root = File::join("/var/tmp", "deltacloud-mock-#{ENV["USER"]}")
-      else
-        raise "Please set either the DELTACLOUD_MOCK_STORAGE or USER environment variable"
-      end
-      @client = Client.new(storage_root)
-    end
-
     def realms(credentials, opts={})
-      check_credentials( credentials )
+      client = new_client( credentials )
       results = []
       safely do
         # This hack is used to test if client capture exceptions correctly
@@ -118,9 +87,9 @@ module Deltacloud::Drivers::Cloudstack
     # Images
     #
     def images(credentials, opts=nil )
-      check_credentials( credentials )
+      client = new_client( credentials )
       images = []
-      images = @client.build_all(Image)
+      images = client.build_all(Image)
       images = filter_on( images, :id, opts )
       images = filter_on( images, :architecture, opts )
       if ( opts && opts[:owner_id] == 'self' )
@@ -133,7 +102,7 @@ module Deltacloud::Drivers::Cloudstack
     end
 
     def create_image(credentials, opts={})
-      check_credentials(credentials)
+      client = new_client(credentials)
       instance = instance(credentials, :id => opts[:id])
       safely do
         raise 'CreateImageNotSupported' unless instance and instance.can_create_image?
@@ -145,14 +114,14 @@ module Deltacloud::Drivers::Cloudstack
           :description => opts[:description],
           :architecture => 'i386'
         }
-        @client.store(:images, image)
+        client.store(:images, image)
         Image.new(image)
       end
     end
 
     def destroy_image(credentials, id)
-      check_credentials( credentials )
-      @client.destroy(:images, id)
+      client = new_client( credentials )
+      client.destroy(:images, id)
     end
 
     #
@@ -160,25 +129,21 @@ module Deltacloud::Drivers::Cloudstack
     #
 
     def instance(credentials, opts={})
-      check_credentials( credentials )
-      if instance = @client.load_collection(:instances, opts[:id])
-        Instance.new(instance)
+      client = new_client( credentials )
+      safely do
+        client.listVirtualMachines()
       end
     end
 
     def instances(credentials, opts={})
-      check_credentials( credentials )
-      instances = @client.build_all(Instance)
-      instances = filter_on( instances, :owner_id, :owner_id => credentials.user )
-      instances = filter_on( instances, :id, opts )
-      instances = filter_on( instances, :state, opts )
-      instances = filter_on( instances, :realm_id, opts)
+      client = new_client( credentials )
+      instances = convert_from_vms(client.listVirtualMachines())
       instances
     end
 
     def create_instance(credentials, image_id, opts)
-      check_credentials( credentials )
-      ids = @client.members(:instances)
+      client = new_client( credentials )
+      ids = client.members(:instances)
 
       count = 0
       while true
@@ -215,15 +180,15 @@ module Deltacloud::Drivers::Cloudstack
         :actions=>instance_actions_for( 'RUNNING' ),
         :user_data => opts[:user_data] ? Base64::decode64(opts[:user_data]) : nil
       }
-      @client.store(:instances, instance)
+      client.store(:instances, instance)
       Instance.new( instance )
     end
 
     def update_instance_state(credentials, id, state)
-      instance  = @client.load_collection(:instances, id)
+      instance  = client.load_collection(:instances, id)
       instance[:state] = state
       instance[:actions] = instance_actions_for( instance[:state] )
-      @client.store(:instances, instance)
+      client.store(:instances, instance)
       Instance.new( instance )
     end
 
@@ -241,8 +206,8 @@ module Deltacloud::Drivers::Cloudstack
 
 
     def destroy_instance(credentials, id)
-      check_credentials( credentials )
-      @client.destroy(:instances, id)
+      client = new_client( credentials )
+      client.destroy(:instances, id)
     end
 
     # mock object to mimick Net::SSH object
@@ -260,14 +225,14 @@ module Deltacloud::Drivers::Cloudstack
     # Storage Volumes
     #
     def storage_volumes(credentials, opts=nil)
-      check_credentials( credentials )
-      volumes = @client.build_all(StorageVolume)
+      client = new_client( credentials )
+      volumes = client.build_all(StorageVolume)
       volumes = filter_on( volumes, :id, opts )
       volumes
     end
 
     def create_storage_volume(credentials, opts={})
-      check_credentials(credentials)
+      client = new_client(credentials)
       opts[:capacity] ||= "1"
       id = "Volume#{Time.now.to_i}"
       volume = {
@@ -277,23 +242,23 @@ module Deltacloud::Drivers::Cloudstack
             :state => "AVAILABLE",
             :capacity => opts[:capacity],
       }
-      @client.store(:storage_volumes, volume)
+      client.store(:storage_volumes, volume)
       StorageVolume.new(volume)
     end
 
     def destroy_storage_volume(credentials, opts={})
-      check_credentials(credentials)
-      @client.destroy(:storage_volumes, opts[:id])
+      client = new_client(credentials)
+      client.destroy(:storage_volumes, opts[:id])
     end
 
     #opts: {:id=,:instance_id,:device}
     def attach_storage_volume(credentials, opts={})
-      check_credentials(credentials)
+      client = new_client(credentials)
       attach_volume_instance(opts[:id], opts[:device], opts[:instance_id])
     end
 
     def detach_storage_volume(credentials, opts)
-      check_credentials(credentials)
+      client = new_client(credentials)
       detach_volume_instance(opts[:id], opts[:instance_id])
     end
 
@@ -302,14 +267,14 @@ module Deltacloud::Drivers::Cloudstack
     #
 
     def storage_snapshots(credentials, opts=nil)
-      check_credentials( credentials )
-      snapshots = @client.build_all(StorageSnapshot)
+      client = new_client( credentials )
+      snapshots = client.build_all(StorageSnapshot)
       snapshots = filter_on(snapshots, :id, opts )
       snapshots
     end
 
     def create_storage_snapshot(credentials, opts={})
-      check_credentials(credentials)
+      client = new_client(credentials)
       id = "store_snapshot_#{Time.now.to_i}"
       snapshot = {
             :id => id,
@@ -319,18 +284,18 @@ module Deltacloud::Drivers::Cloudstack
       }
       snapshot.merge!({:name=>opts[:name]}) if opts[:name]
       snapshot.merge!({:description=>opts[:description]}) if opts[:description]
-      @client.store(:storage_snapshots, snapshot)
+      client.store(:storage_snapshots, snapshot)
       StorageSnapshot.new(snapshot)
     end
 
     def destroy_storage_snapshot(credentials, opts={})
-      check_credentials(credentials)
-      @client.destroy(:storage_snapshots, opts[:id])
+      client = new_client(credentials)
+      client.destroy(:storage_snapshots, opts[:id])
     end
 
     def keys(credentials, opts={})
-      check_credentials(credentials)
-      result = @client.build_all(Key)
+      client = new_client(credentials)
+      result = client.build_all(Key)
       result = filter_on( result, :id, opts )
       result
     end
@@ -340,7 +305,7 @@ module Deltacloud::Drivers::Cloudstack
     end
 
     def create_key(credentials, opts={})
-      check_credentials(credentials)
+      client = new_client(credentials)
       key_hash = {
         :id => opts[:key_name],
         :credential_type => :key,
@@ -348,195 +313,65 @@ module Deltacloud::Drivers::Cloudstack
         :pem_rsa_key => Key::generate_mock_pem
       }
       safely do
-        raise "KeyExist" if @client.load_collection(:keys, key_hash[:id])
-        @client.store(:keys, key_hash)
+        raise "KeyExist" if client.load_collection(:keys, key_hash[:id])
+        client.store(:keys, key_hash)
       end
       return Key.new(key_hash)
     end
 
     def destroy_key(credentials, opts={})
       key = key(credentials, opts)
-      @client.destroy(:keys, key.id)
+      client.destroy(:keys, key.id)
     end
 
     def addresses(credentials, opts={})
-      check_credentials(credentials)
-      addresses = @client.build_all(Address)
+      client = new_client(credentials)
+      addresses = client.build_all(Address)
       addresses = filter_on( addresses, :id, opts )
     end
 
     def create_address(credentials, opts={})
-      check_credentials(credentials)
+      client = new_client(credentials)
       address = {:id => allocate_mock_address.to_s, :instance_id=>nil}
-      @client.store(:addresses, address)
+      client.store(:addresses, address)
       Address.new(address)
     end
 
     def destroy_address(credentials, opts={})
-      check_credentials(credentials)
-      address = @client.load_collection(:addresses, opts[:id])
+      client = new_client(credentials)
+      address = client.load_collection(:addresses, opts[:id])
       raise "AddressInUse" unless address[:instance_id].nil?
-      @client.destroy(:addresses, opts[:id])
+      client.destroy(:addresses, opts[:id])
     end
 
     def associate_address(credentials, opts={})
-      check_credentials(credentials)
-      address = @client.load_collection(:addresses, opts[:id])
+      client = new_client(credentials)
+      address = client.load_collection(:addresses, opts[:id])
       raise "AddressInUse" unless address[:instance_id].nil?
-      instance = @client.load_collection(:instances, opts[:instance_id])
+      instance = client.load_collection(:instances, opts[:instance_id])
       address[:instance_id] = instance[:id]
       instance[:public_addresses] = [InstanceAddress.new(address[:id])]
-      @client.store(:addresses, address)
-      @client.store(:instances, instance)
+      client.store(:addresses, address)
+      client.store(:instances, instance)
     end
 
     def disassociate_address(credentials, opts={})
-      check_credentials(credentials)
-      address = @client.load_collection(:addresses, opts[:id])
+      client = new_client(credentials)
+      address = client.load_collection(:addresses, opts[:id])
       raise "AddressNotInUse" unless address[:instance_id]
-      instance = @client.load_collection(:instances, address[:instance_id])
+      instance = client.load_collection(:instances, address[:instance_id])
       address[:instance_id] = nil
       instance[:public_addresses] = [InstanceAddress.new("#{instance[:image_id]}.#{instance[:id]}.public.com", :type => :hostname)]
-      @client.store(:addresses, address)
-      @client.store(:instances, instance)
-    end
-
-    #--
-    # Buckets
-    #--
-    def buckets(credentials, opts={})
-      check_credentials(credentials)
-      buckets = @client.build_all(Bucket)
-      blob_map = @client.load_all(:blobs).inject({}) do |map, blob|
-        map[blob[:bucket]] ||= []
-        map[blob[:bucket]] << blob[:id]
-        map
-      end
-      buckets.each { |bucket| bucket.blob_list = blob_map[bucket.id] }
-      filter_on( buckets, :id, opts )
-    end
-
-    #--
-    # Create bucket
-    #--
-    def create_bucket(credentials, name, opts={})
-      check_credentials(credentials)
-      bucket = {
-        :id => name,
-        :name=>name,
-        :size=>'0',
-        :blob_list=>[]
-      }
-      @client.store(:buckets, bucket)
-      Bucket.new(bucket)
-    end
-
-    #--
-    # Delete bucket
-    #--
-    def delete_bucket(credentials, name, opts={})
-      check_credentials(credentials)
-      bucket = bucket(credentials, {:id => name})
-      raise 'BucketNotExist' if bucket.nil?
-      raise "BucketNotEmpty" unless bucket.blob_list.empty?
-      @client.destroy(:buckets, bucket.id)
-    end
-
-    #--
-    # Blobs
-    #--
-    def blobs(credentials, opts = {})
-      check_credentials(credentials)
-      blobs = @client.build_all(Blob)
-      filter_on( blobs, :bucket, :bucket => opts['bucket'] )
-      filter_on( blobs, :id, opts )
-    end
-
-    #--
-    # Blob content
-    #--
-    def blob_data(credentials, bucket_id, blob_id, opts = {})
-      check_credentials(credentials)
-      if blob = @client.load_collection(:blobs, blob_id)
-        #give event machine a chance
-        sleep 1
-        blob[:content].split('').each {|part| yield part}
-      end
-    end
-
-    #--
-    # Create blob
-    #--
-    def create_blob(credentials, bucket_id, blob_id, blob_data, opts={})
-      check_credentials(credentials)
-      blob_meta = BlobHelper::extract_blob_metadata_hash(opts)
-      blob = {
-        :id => blob_id,
-        :name => blob_id,
-        :bucket => bucket_id,
-        :last_modified => Time.now,
-        :user_metadata => BlobHelper::rename_metadata_headers(blob_meta, ''),
-      }
-      if blob_data.kind_of? Hash
-        blob_data[:tempfile].rewind
-        blob.merge!({
-          :content_length => blob_data[:tempfile].length,
-          :content_type => blob_data[:type],
-          :content => blob_data[:tempfile].read
-        })
-      elsif blob_data.kind_of? String
-        blob.merge!({
-          :content_length => blob_data.size,
-          :content_type => 'text/plain',
-          :content => blob_data
-        })
-      end
-      @client.store(:blobs, blob)
-      Blob.new(blob)
-    end
-
-    #--
-    # Delete blob
-    #--
-    def delete_blob(credentials, bucket_id, blob_id, opts={})
-      check_credentials(credentials)
-      safely do
-        raise "NotExistentBlob" unless @client.load_collection(:blobs, blob_id)
-        @client.destroy(:blobs, blob_id)
-      end
-    end
-
-    #--
-    # Get metadata
-    #--
-    def blob_metadata(credentials, opts={})
-      check_credentials(credentials)
-      if blob = @client.load_collection(:blobs, opts[:id])
-        blob[:user_metadata]
-      else
-        nil
-      end
-    end
-
-    #--
-    # Update metadata
-    #--
-    def update_blob_metadata(credentials, opts={})
-      check_credentials(credentials)
-      safely do
-        blob = @client.load_collection(:blobs, opts[:id])
-        return false unless blob
-        blob[:user_metadata] = BlobHelper::rename_metadata_headers(opts['meta_hash'], '')
-        @client.store(:blobs, blob)
-      end
+      client.store(:addresses, address)
+      client.store(:instances, instance)
     end
 
     #--
     # Metrics
     #--
     def metrics(credentials, opts={})
-      check_credentials( credentials )
-      instances = @client.build_all(Instance)
+      client = new_client( credentials )
+      instances = client.build_all(Instance)
       instances = filter_on( instances, :id, opts )
 
       metrics_arr = instances.collect do |instance|
@@ -581,7 +416,7 @@ module Deltacloud::Drivers::Cloudstack
 
     def valid_credentials?(credentials)
       begin
-        check_credentials(credentials)
+        new_client(credentials)
         return true
       rescue
       end
@@ -590,11 +425,20 @@ module Deltacloud::Drivers::Cloudstack
 
     private
 
-    def check_credentials(credentials)
+    def new_client(credentials)
       safely do
-        if ( credentials.user != 'mockuser' ) or ( credentials.password != 'mockpassword' )
-          raise 'AuthFailure'
+        if credentials.user.empty?
+          raise AuthenticationFailure.new(Exception.new("Error: you must supply your CloudStack API key as your username"))
         end
+        if credentials.password.empty?
+          raise AuthenticationFailure.new(Exception.new("Error: you must supply your CloudStack Secret key as your password"))
+        end
+        #if credentials.provider.empty?
+        #  raise AuthenticationFailure.new(Exception.new("Error: you must supply the API endpoint URL as the provider"))
+        #end
+        puts credentials.to_s
+        # HACK: I actually need to fix the client gem to remove the last init param
+        return CloudstackRubyClient::Client.new(credentials.provider, credentials.user, credentials.password, false)
       end
     end
 
@@ -603,35 +447,35 @@ module Deltacloud::Drivers::Cloudstack
     #mutex seemed overkill)
     def allocate_mock_address
       addresses = []
-      @client.members(:addresses).each do |addr|
+      client.members(:addresses).each do |addr|
         addresses << IPAddr.new("#{addr}").to_i
       end
       IPAddr.new(addresses.sort.pop+1, Socket::AF_INET)
     end
 
     def attach_volume_instance(volume_id, device, instance_id)
-      volume = @client.load_collection(:storage_volumes, volume_id)
-      instance = @client.load_collection(:instances, instance_id)
+      volume = client.load_collection(:storage_volumes, volume_id)
+      instance = client.load_collection(:instances, instance_id)
       volume[:instance_id] = instance_id
       volume[:device] = device
       volume[:state] = "IN-USE"
       instance[:storage_volumes] ||= []
       instance[:storage_volumes] << {volume_id=>device}
-      @client.store(:storage_volumes, volume)
-      @client.store(:instances, instance)
+      client.store(:storage_volumes, volume)
+      client.store(:instances, instance)
       StorageVolume.new(volume)
     end
 
     def detach_volume_instance(volume_id, instance_id)
-      volume = @client.load_collection(:storage_volumes, volume_id)
-      instance = @client.load_collection(:instances, instance_id)
+      volume = client.load_collection(:storage_volumes, volume_id)
+      instance = client.load_collection(:instances, instance_id)
       volume[:instance_id] = nil
       device = volume[:device]
       volume[:device] = nil
       volume[:state] = "AVAILABLE"
       instance[:storage_volumes].delete({volume_id => device}) unless instance[:storage_volumes].nil?
-      @client.store(:storage_volumes, volume)
-      @client.store(:instances, instance)
+      client.store(:storage_volumes, volume)
+      client.store(:instances, instance)
       StorageVolume.new(volume)
     end
 
@@ -645,6 +489,29 @@ module Deltacloud::Drivers::Cloudstack
         else 'None'
       end
     end
+
+    # Conversion methods
+
+    def convert_from_vm(vm)
+      inst = Instance.new(
+        :id => vm.id,
+        :realm_id => 'default',
+        :owner_id => vm.account,
+        :description => vm.name,
+        :state => :running, #convert_vm_state(vm.state),
+        :architecture => 'x86_64',
+        :image_id => vm.templateid,
+        :instance_profile => InstanceProfile::new(vm.serviceofferingid),
+        :public_addresses => InstanceAddress.new('', :public ), #convert_vm_addresses(vm, :public),
+        :private_addresses => InstanceAddress.new('', :private ),#convert_vm_addresses(vm, :private),
+        :username => 'root',
+        :password => vm.password,
+        :keyname => vm.keypair
+      )
+      inst
+    end
+
+
 
     # names copied from FGCP driver
     @@METRIC_NAMES = [
